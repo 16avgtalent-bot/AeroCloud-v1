@@ -1,0 +1,92 @@
+# Codemagic CI для AeroCloud.
+#
+# Файл должен лежать в корне git-репозитория — рядом с project.yml.
+# Workflow собирает unsigned simulator build, гоняет тесты Core,
+# запускает DesignSystemGalleryView и сохраняет скриншот.
+#
+# Для сборки на устройство/TestFlight нужен Apple Developer аккаунт
+# и настроенный code signing в Codemagic. Simulator-сборка работает без него.
+
+workflows:
+  ios-simulator:
+    name: iOS 27 Simulator / Build + Tests + Gallery
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      # Если Codemagic ещё не показывает 27.1, замени на доступную 27.x
+      # или latest и проверь наличие iOS 27 SDK.
+      xcode: 27.1
+      vars:
+        XCODE_PROJECT: "AeroCloud.xcodeproj"
+        XCODE_SCHEME: "AeroCloud"
+        BUNDLE_ID: "app.aerocloud.ios"
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
+    scripts:
+      - name: Install tools
+        script: |
+          set -euo pipefail
+          brew install xcodegen swiftformat
+
+      - name: Static validation
+        script: |
+          set -euo pipefail
+          python3 scripts/validate.py
+          python3 scripts/check_strings.py
+          swiftformat --lint --config .swiftformat AeroCloud Packages
+
+      - name: Core unit tests
+        script: |
+          set -euo pipefail
+          swift test --package-path Packages/AeroCloudCore
+
+      - name: Generate Xcode project
+        script: |
+          set -euo pipefail
+          xcodegen generate
+
+      - name: Build for simulator
+        script: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Launch design gallery and capture screenshot
+        script: |
+          set -euo pipefail
+          DEVICE_ID="$(xcrun simctl list devices available | grep -m1 'iPhone' | grep -oE '[0-9A-Fa-f-]{36}' | head -1)"
+          if [ -z "$DEVICE_ID" ]; then
+            echo "No available iPhone simulator found"
+            exit 1
+          fi
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+          xcrun simctl install "$DEVICE_ID" build/Build/Products/Debug-iphonesimulator/AeroCloud.app
+          xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID" -designGallery
+          sleep 5
+          xcrun simctl io "$DEVICE_ID" screenshot gallery.png
+
+      - name: Package simulator app
+        script: |
+          set -euo pipefail
+          cd build/Build/Products/Debug-iphonesimulator
+          ditto -c -k --sequesterRsrc --keepParent AeroCloud.app AeroCloud-simulator.zip
+
+    artifacts:
+      - gallery.png
+      - build/Build/Products/Debug-iphonesimulator/AeroCloud-simulator.zip
+      - build/Build/Products/Debug-iphonesimulator/AeroCloud.app
+      - build/Build/Products/Debug-iphonesimulator/AeroCloud.app.dSYM

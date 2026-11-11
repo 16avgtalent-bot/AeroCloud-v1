@@ -1,24 +1,14 @@
 # Codemagic CI для AeroCloud.
-#
-# ВАЖНО: этот файл должен лежать в КОРНЕ git-репозитория,
-# на той же ветке, которую выбрал Codemagic (обычно main).
-#
-# Скрипты ниже сами находят project.yml:
-#   - в корне репозитория;
-#   - или в подпапке AeroCloud/.
-# Поэтому конфиг работает и если репозиторий — это папка AeroCloud,
-# и если в репозиторий загружена родительская папка целиком.
 
 workflows:
   ios-simulator:
-    name: AeroCloud / iOS 27 Simulator
+    name: AeroCloud / iOS Simulator
     instance_type: mac_mini_m2
     max_build_duration: 60
 
     environment:
-      # Если Codemagic ещё не показывает 27.1, замени на доступную 27.x
-      # или latest и проверь наличие iOS 27 SDK.
-      xcode: 27.1
+      # Изменено на latest, так как 27.1 пока не существует
+      xcode: latest
       vars:
         XCODE_SCHEME: "AeroCloud"
         BUNDLE_ID: "app.aerocloud.ios"
@@ -61,16 +51,33 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             build
 
+          APP_PATH="build/Build/Products/Debug-iphonesimulator/AeroCloud.app"
           mkdir -p "$REPO_ROOT/artifacts"
+
+          DERIVED_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist" 2>/dev/null || true)"
+          if [ -n "$DERIVED_BUNDLE_ID" ]; then
+            BUNDLE_ID="$DERIVED_BUNDLE_ID"
+          fi
+          echo "Launching bundle: $BUNDLE_ID"
 
           DEVICE_ID="$(xcrun simctl list devices available | grep -m1 'iPhone' | grep -oE '[0-9A-Fa-f-]{36}' | head -1 || true)"
           if [ -n "$DEVICE_ID" ]; then
             xcrun simctl boot "$DEVICE_ID" || true
             xcrun simctl bootstatus "$DEVICE_ID" -b || true
-            xcrun simctl install "$DEVICE_ID" build/Build/Products/Debug-iphonesimulator/AeroCloud.app || true
-            xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID" -designGallery || true
+            xcrun simctl install "$DEVICE_ID" "$APP_PATH" || true
+            xcrun simctl listapps "$DEVICE_ID" > "$REPO_ROOT/artifacts/listapps.log" || true
+            xcrun simctl launch \
+              --terminate-running-process \
+              --stdout="$REPO_ROOT/artifacts/app-stdout.log" \
+              --stderr="$REPO_ROOT/artifacts/app-stderr.log" \
+              "$DEVICE_ID" "$BUNDLE_ID" -designGallery \
+              | tee "$REPO_ROOT/artifacts/launch.log" || true
             sleep 5
             xcrun simctl io "$DEVICE_ID" screenshot gallery.png || true
+            xcrun simctl spawn "$DEVICE_ID" log show \
+              --last 2m --style compact \
+              --predicate 'process == "AeroCloud" OR eventMessage CONTAINS "AeroCloud"' \
+              > "$REPO_ROOT/artifacts/simulator.log" || true
             if [ -f gallery.png ]; then
               cp gallery.png "$REPO_ROOT/artifacts/gallery.png"
             fi
@@ -79,11 +86,172 @@ workflows:
           fi
 
           ditto -c -k --sequesterRsrc --keepParent \
-            build/Build/Products/Debug-iphonesimulator/AeroCloud.app \
+            "$APP_PATH" \
             "$REPO_ROOT/artifacts/AeroCloud-simulator.zip"
 
     artifacts:
       - artifacts/**
+
+  ios-testflight:
+    name: AeroCloud / TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 90
+
+    integrations:
+      app_store_connect: "AeroCloud App Store Connect"
+
+    environment:
+      xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: app.aerocloud.ios
+      vars:
+        XCODE_SCHEME: "AeroCloud"
+        BUNDLE_ID: "app.aerocloud.ios"
+
+    scripts:
+      - name: Generate Xcode project
+        script: |
+          set -euo pipefail
+
+          if [ -f project.yml ]; then
+            PROJECT_DIR="."
+          elif [ -f AeroCloud/project.yml ]; then
+            PROJECT_DIR="AeroCloud"
+          else
+            echo "project.yml not found in repo root or AeroCloud/"
+            exit 1
+          fi
+
+          cd "$PROJECT_DIR"
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Configure code signing
+        script: |
+          set -euo pipefail
+
+          if [ -f project.yml ]; then
+            PROJECT_DIR="."
+          elif [ -f AeroCloud/project.yml ]; then
+            PROJECT_DIR="AeroCloud"
+          else
+            echo "project.yml not found in repo root or AeroCloud/"
+            exit 1
+          fi
+
+          cd "$PROJECT_DIR"
+          xcode-project use-profiles \
+            --project AeroCloud.xcodeproj \
+            --archive-method app-store \
+            --custom-export-options='{"testFlightInternalTestingOnly": true}'
+
+      - name: Build signed IPA
+        script: |
+          set -euo pipefail
+
+          REPO_ROOT="$(pwd)"
+
+          if [ -f project.yml ]; then
+            PROJECT_DIR="."
+          elif [ -f AeroCloud/project.yml ]; then
+            PROJECT_DIR="AeroCloud"
+          else
+            echo "project.yml not found in repo root or AeroCloud/"
+            exit 1
+          fi
+
+          cd "$PROJECT_DIR"
+
+          xcode-project build-ipa \
+            --project AeroCloud.xcodeproj \
+            --scheme "$XCODE_SCHEME" \
+            --config Release \
+            --archive-flags="-destination 'generic/platform=iOS'" \
+            --archive-xcargs "CURRENT_PROJECT_VERSION=${BUILD_NUMBER:-1}"
+
+          mkdir -p "$REPO_ROOT/artifacts"
+          find build/ios/ipa -maxdepth 1 -name '*.ipa' -exec cp {} "$REPO_ROOT/artifacts/" \;
+          test -n "$(find "$REPO_ROOT/artifacts" -maxdepth 1 -name '*.ipa' -print -quit)"
+
+    artifacts:
+      - artifacts/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+
+  ios-sideload:
+    name: AeroCloud / Sideload IPA (unsigned)
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+
+    environment:
+      # Изменено на latest
+      xcode: latest
+      vars:
+        XCODE_SCHEME: "AeroCloud"
+
+    scripts:
+      - name: Build unsigned device IPA
+        script: |
+          set -euo pipefail
+
+          REPO_ROOT="$(pwd)"
+
+          if [ -f project.yml ]; then
+            PROJECT_DIR="."
+          elif [ -f AeroCloud/project.yml ]; then
+            PROJECT_DIR="AeroCloud"
+          else
+            echo "project.yml not found in repo root or AeroCloud/"
+            exit 1
+          fi
+
+          cd "$PROJECT_DIR"
+          brew install xcodegen
+          xcodegen generate
+
+          # Собираем именно arm64-бинарник для физического iPhone.
+          # Подпись отключена: её сделает Sideloadly на компьютере.
+          xcodebuild \
+            -project AeroCloud.xcodeproj \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+          APP_PATH="build/Build/Products/Release-iphoneos/AeroCloud.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Device .app not found at $APP_PATH"
+            exit 1
+          fi
+
+          # Sideloadly сам подпишет приложение. Убираем остатки подписи,
+          # чтобы не тащить в IPA чужие entitlements/provisioning profile.
+          rm -rf "$APP_PATH/_CodeSignature"
+          rm -f "$APP_PATH/embedded.mobileprovision"
+
+          mkdir -p "$REPO_ROOT/artifacts/Payload"
+          rm -rf "$REPO_ROOT/artifacts/Payload/AeroCloud.app"
+          cp -R "$APP_PATH" "$REPO_ROOT/artifacts/Payload/AeroCloud.app"
+
+          cd "$REPO_ROOT/artifacts"
+          rm -f AeroCloud-unsigned.ipa
+          zip -qry AeroCloud-unsigned.ipa Payload
+          rm -rf Payload
+
+          ls -lh "$REPO_ROOT/artifacts/AeroCloud-unsigned.ipa"
+
+    artifacts:
+      - artifacts/AeroCloud-unsigned.ipa
+      - /tmp/xcodebuild_logs/*.log
 
   quality:
     name: AeroCloud / Static checks + Core tests
@@ -91,7 +259,7 @@ workflows:
     max_build_duration: 30
 
     environment:
-      xcode: 27.1
+      xcode: latest
 
     scripts:
       - name: Validate

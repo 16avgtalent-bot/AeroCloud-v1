@@ -1,0 +1,108 @@
+name: AeroCloud
+
+options:
+  bundleIdPrefix: app.aerocloud
+  deploymentTarget:
+    iOS: "27.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+configs:
+  Debug: debug
+  Release: release
+
+configFiles:
+  Debug: Config/Debug.xcconfig
+  Release: Config/Release.xcconfig
+
+packages:
+  AeroCloudCore:
+    path: Packages/AeroCloudCore
+  AeroCloudUI:
+    path: Packages/AeroCloudUI
+  AeroCloudPlayer:
+    path: Packages/AeroCloudPlayer
+  AeroCloudRecommendations:
+    path: Packages/AeroCloudRecommendations
+  AeroCloudAuth:
+    path: Packages/AeroCloudAuth
+  AeroCloudProviders:
+    path: Packages/AeroCloudProviders
+
+targets:
+  AeroCloud:
+    type: application
+    platform: iOS
+    deploymentTarget: "27.0"
+    sources:
+      - path: AeroCloud
+        excludes:
+          - "Info.plist"
+    dependencies:
+      - package: AeroCloudCore
+      - package: AeroCloudUI
+      - package: AeroCloudPlayer
+      - package: AeroCloudRecommendations
+      - package: AeroCloudAuth
+      - package: AeroCloudProviders
+    info:
+      path: AeroCloud/Info.plist
+      properties:
+        CFBundleDisplayName: AeroCloud
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleDevelopmentRegion: en
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationQueriesSchemes:
+          - spotify
+          - soundcloud
+          - music
+        NSAppleMusicUsageDescription: "AeroCloud uses Apple Music to find and play tracks."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
+        NSSupportsLiveActivities: true
+        UIApplicationSupportsIndirectInputEvents: true
+        UIBackgroundModes:
+          - audio
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIUserInterfaceStyle: Dark
+        CFBundleURLTypes:
+          - CFBundleURLName: app.aerocloud.ios
+            CFBundleURLSchemes:
+              - aerocloud
+        AeroCloudBackendURL: $(AEROCLOUD_BACKEND_URL)
+        SpotifyClientID: $(SPOTIFY_CLIENT_ID)
+        SoundCloudClientID: $(SOUNDCLOUD_CLIENT_ID)
+        LastFMAPIKey: $(LASTFM_API_KEY)
+        DeezerAppID: $(DEEZER_APP_ID)
+        TelegramBotUsername: $(TELEGRAM_BOT_USERNAME)
+    settings:
+      base:
+        PRODUCT_NAME: AeroCloud
+        PRODUCT_BUNDLE_IDENTIFIER: app.aerocloud.ios
+        CODE_SIGN_ENTITLEMENTS: Config/AeroCloud.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: AeroCloud/Info.plist
+        LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+        SWIFT_EMIT_LOC_STRINGS: YES
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+
+schemes:
+  AeroCloud:
+    build:
+      targets:
+        AeroCloud: all
+    run:
+      config: Debug
+    archive:
+      config: Release
